@@ -9,11 +9,12 @@ const app = express();
 
 const PORT = process.env.PORT || 3000;
 const DATABASE_URL = process.env.DATABASE_URL;
+
 const JWT_SECRET =
     process.env.JWT_SECRET || "PhoneStoreCloud2026Secret";
 
 /* =====================================================
-   KIỂM TRA ENV
+   ENVIRONMENT
 ===================================================== */
 
 if (!DATABASE_URL) {
@@ -21,20 +22,27 @@ if (!DATABASE_URL) {
 }
 
 /* =====================================================
-   CORS
+   CORS - VERCEL FRONTEND
 ===================================================== */
 
 const allowedOrigins = [
     "http://localhost:5173",
     "http://127.0.0.1:5173",
+
+    // Vercel production
     "https://phone-store-kha21.vercel.app",
+
+    // Vercel deployment
     "https://phone-store-iv427fqf2-kha21.vercel.app",
+
+    // Render Environment Variable
     process.env.FRONTEND_URL
 ].filter(Boolean);
 
 app.use(
     cors({
         origin: function (origin, callback) {
+            // Cho phép Postman/curl/server-to-server
             if (!origin) {
                 return callback(null, true);
             }
@@ -44,8 +52,10 @@ app.use(
             }
 
             console.log("⚠️ CORS blocked:", origin);
+
             return callback(null, false);
         },
+
         methods: [
             "GET",
             "POST",
@@ -53,6 +63,7 @@ app.use(
             "DELETE",
             "OPTIONS"
         ],
+
         allowedHeaders: [
             "Content-Type",
             "Authorization"
@@ -63,7 +74,7 @@ app.use(
 app.use(express.json());
 
 /* =====================================================
-   DATABASE SUPABASE POSTGRESQL
+   SUPABASE POSTGRESQL
 ===================================================== */
 
 const pool = new Pool({
@@ -82,20 +93,26 @@ const pool = new Pool({
 
 pool.on("error", (error) => {
     console.error(
-        "PostgreSQL pool error:",
+        "❌ PostgreSQL pool error:",
         error.message
     );
 });
 
 /* =====================================================
-   TẠO BẢNG
+   DATABASE INITIALIZATION
 ===================================================== */
 
 async function initializeDatabase() {
+    if (!DATABASE_URL) {
+        console.error(
+            "❌ Không thể khởi tạo database vì thiếu DATABASE_URL"
+        );
+
+        return;
+    }
+
     try {
-        if (!DATABASE_URL) {
-            return;
-        }
+        /* USERS */
 
         await pool.query(`
             CREATE TABLE IF NOT EXISTS users (
@@ -107,6 +124,8 @@ async function initializeDatabase() {
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         `);
+
+        /* PRODUCTS */
 
         await pool.query(`
             CREATE TABLE IF NOT EXISTS products (
@@ -120,14 +139,54 @@ async function initializeDatabase() {
             )
         `);
 
+        /* BỔ SUNG image_url NẾU BẢNG CŨ CHƯA CÓ */
+
         await pool.query(`
             ALTER TABLE products
             ADD COLUMN IF NOT EXISTS image_url TEXT
         `);
 
+        /* ORDERS */
+
+        await pool.query(`
+            CREATE TABLE IF NOT EXISTS orders (
+                id SERIAL PRIMARY KEY,
+                user_id INTEGER REFERENCES users(id),
+                customer_name VARCHAR(100) NOT NULL,
+                customer_phone VARCHAR(20) NOT NULL,
+                customer_address TEXT NOT NULL,
+                total_amount NUMERIC(15,2) NOT NULL DEFAULT 0,
+                status VARCHAR(50) NOT NULL DEFAULT 'pending',
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        `);
+
+        /* ORDER ITEMS */
+
+        await pool.query(`
+            CREATE TABLE IF NOT EXISTS order_items (
+                id SERIAL PRIMARY KEY,
+                order_id INTEGER
+                    REFERENCES orders(id)
+                    ON DELETE CASCADE,
+
+                product_id INTEGER
+                    REFERENCES products(id),
+
+                product_name VARCHAR(255),
+
+                quantity INTEGER NOT NULL,
+
+                price NUMERIC(15,2) NOT NULL,
+
+                subtotal NUMERIC(15,2) NOT NULL
+            )
+        `);
+
         console.log(
             "✅ Database tables ready"
         );
+
     } catch (error) {
         console.error(
             "❌ Database initialization error:",
@@ -137,37 +196,38 @@ async function initializeDatabase() {
 }
 
 /* =====================================================
-   DATABASE CONNECTION
+   DATABASE CONNECTION TEST
 ===================================================== */
 
 async function testDatabase() {
-    try {
-        if (!DATABASE_URL) {
-            return;
-        }
+    if (!DATABASE_URL) {
+        return false;
+    }
 
+    try {
         await pool.query("SELECT 1");
 
         console.log(
-            "✅ Database connected successfully"
+            "✅ PostgreSQL / Supabase connected successfully"
         );
+
+        return true;
+
     } catch (error) {
         console.error(
-            "❌ Database connection error:",
+            "❌ PostgreSQL connection error:",
             error.message
         );
+
+        return false;
     }
 }
 
 /* =====================================================
-   JWT
+   JWT AUTHENTICATION
 ===================================================== */
 
-function authenticateToken(
-    req,
-    res,
-    next
-) {
+function authenticateToken(req, res, next) {
     const authHeader =
         req.headers.authorization;
 
@@ -199,12 +259,33 @@ function authenticateToken(
         req.user = decoded;
 
         next();
-    } catch {
+
+    } catch (error) {
         return res.status(401).json({
             message:
                 "Token không hợp lệ hoặc đã hết hạn"
         });
     }
+}
+
+/* =====================================================
+   ADMIN AUTHENTICATION
+===================================================== */
+
+function requireAdmin(req, res, next) {
+    if (!req.user) {
+        return res.status(401).json({
+            message: "Bạn chưa đăng nhập"
+        });
+    }
+
+    if (req.user.role !== "admin") {
+        return res.status(403).json({
+            message: "Bạn không có quyền quản trị"
+        });
+    }
+
+    next();
 }
 
 /* =====================================================
@@ -214,13 +295,13 @@ function authenticateToken(
 app.get("/", (req, res) => {
     res.json({
         status: "success",
-        message:
-            "Phone Store Cloud API is running!"
+        message: "Phone Store Cloud API is running!",
+        database: "PostgreSQL / Supabase"
     });
 });
 
 /* =====================================================
-   HEALTH
+   HEALTH CHECK
 ===================================================== */
 
 app.get(
@@ -233,16 +314,18 @@ app.get(
                 status: "success",
                 server: "connected",
                 database: "connected",
+                database_type: "PostgreSQL",
                 timestamp:
                     new Date().toISOString()
             });
+
         } catch (error) {
             res.status(500).json({
                 status: "error",
                 server: "connected",
                 database: "disconnected",
-                message:
-                    error.message
+                database_type: "PostgreSQL",
+                message: error.message
             });
         }
     }
@@ -273,9 +356,7 @@ app.post(
                 });
             }
 
-            if (
-                password.length < 6
-            ) {
+            if (password.length < 6) {
                 return res.status(400).json({
                     message:
                         "Mật khẩu phải có ít nhất 6 ký tự"
@@ -297,9 +378,7 @@ app.post(
                     [cleanEmail]
                 );
 
-            if (
-                exists.rows.length > 0
-            ) {
+            if (exists.rows.length > 0) {
                 return res.status(400).json({
                     message:
                         "Email đã tồn tại"
@@ -341,9 +420,11 @@ app.post(
             res.status(201).json({
                 message:
                     "Đăng ký thành công",
+
                 user:
                     result.rows[0]
             });
+
         } catch (error) {
             console.error(
                 "Register error:",
@@ -352,7 +433,9 @@ app.post(
 
             res.status(500).json({
                 message:
-                    "Lỗi server khi đăng ký"
+                    "Lỗi server khi đăng ký",
+                error:
+                    error.message
             });
         }
     }
@@ -393,9 +476,7 @@ app.post(
                     [cleanEmail]
                 );
 
-            if (
-                result.rows.length === 0
-            ) {
+            if (result.rows.length === 0) {
                 return res.status(401).json({
                     message:
                         "Email hoặc mật khẩu không đúng"
@@ -425,17 +506,20 @@ app.post(
                         email: user.email,
                         role: user.role
                     },
+
                     JWT_SECRET,
+
                     {
-                        expiresIn:
-                            "1d"
+                        expiresIn: "1d"
                     }
                 );
 
             res.json({
                 message:
                     "Đăng nhập thành công",
+
                 token,
+
                 user: {
                     id: user.id,
                     name: user.name,
@@ -443,6 +527,7 @@ app.post(
                     role: user.role
                 }
             });
+
         } catch (error) {
             console.error(
                 "Login error:",
@@ -451,7 +536,9 @@ app.post(
 
             res.status(500).json({
                 message:
-                    "Lỗi server khi đăng nhập"
+                    "Lỗi server khi đăng nhập",
+                error:
+                    error.message
             });
         }
     }
@@ -481,9 +568,7 @@ app.get(
                     [req.user.id]
                 );
 
-            if (
-                result.rows.length === 0
-            ) {
+            if (result.rows.length === 0) {
                 return res.status(404).json({
                     message:
                         "Không tìm thấy tài khoản"
@@ -494,10 +579,18 @@ app.get(
                 user:
                     result.rows[0]
             });
+
         } catch (error) {
+            console.error(
+                "Auth me error:",
+                error.message
+            );
+
             res.status(500).json({
                 message:
-                    "Lỗi server"
+                    "Lỗi server",
+                error:
+                    error.message
             });
         }
     }
@@ -523,6 +616,7 @@ app.get(
             res.json(
                 result.rows
             );
+
         } catch (error) {
             console.error(
                 "Products error:",
@@ -532,6 +626,7 @@ app.get(
             res.status(500).json({
                 message:
                     "Lỗi khi lấy danh sách sản phẩm",
+
                 error:
                     error.message
             });
@@ -557,9 +652,7 @@ app.get(
                     [req.params.id]
                 );
 
-            if (
-                result.rows.length === 0
-            ) {
+            if (result.rows.length === 0) {
                 return res.status(404).json({
                     message:
                         "Không tìm thấy sản phẩm"
@@ -569,10 +662,481 @@ app.get(
             res.json(
                 result.rows[0]
             );
+
         } catch (error) {
+            console.error(
+                "Product detail error:",
+                error.message
+            );
+
             res.status(500).json({
                 message:
-                    "Lỗi khi lấy sản phẩm"
+                    "Lỗi khi lấy sản phẩm",
+
+                error:
+                    error.message
+            });
+        }
+    }
+);
+
+/* =====================================================
+   PRODUCTS - CREATE
+===================================================== */
+
+app.post(
+    "/api/products",
+    authenticateToken,
+    requireAdmin,
+    async (req, res) => {
+        try {
+            const {
+                name,
+                price,
+                category,
+                description,
+                image_url
+            } = req.body;
+
+            if (!name || price === undefined) {
+                return res.status(400).json({
+                    message:
+                        "Tên và giá sản phẩm là bắt buộc"
+                });
+            }
+
+            const result =
+                await pool.query(
+                    `
+                    INSERT INTO products
+                    (
+                        name,
+                        price,
+                        category,
+                        description,
+                        image_url
+                    )
+                    VALUES
+                    ($1, $2, $3, $4, $5)
+                    RETURNING *
+                    `,
+                    [
+                        name,
+                        price,
+                        category || null,
+                        description || null,
+                        image_url || null
+                    ]
+                );
+
+            res.status(201).json({
+                message:
+                    "Thêm sản phẩm thành công",
+
+                product:
+                    result.rows[0]
+            });
+
+        } catch (error) {
+            console.error(
+                "Create product error:",
+                error.message
+            );
+
+            res.status(500).json({
+                message:
+                    "Lỗi khi thêm sản phẩm",
+
+                error:
+                    error.message
+            });
+        }
+    }
+);
+
+/* =====================================================
+   PRODUCTS - UPDATE
+===================================================== */
+
+app.put(
+    "/api/products/:id",
+    authenticateToken,
+    requireAdmin,
+    async (req, res) => {
+        try {
+            const {
+                name,
+                price,
+                category,
+                description,
+                image_url
+            } = req.body;
+
+            const result =
+                await pool.query(
+                    `
+                    UPDATE products
+                    SET
+                        name = COALESCE($1, name),
+                        price = COALESCE($2, price),
+                        category = COALESCE($3, category),
+                        description = COALESCE($4, description),
+                        image_url = COALESCE($5, image_url)
+                    WHERE id = $6
+                    RETURNING *
+                    `,
+                    [
+                        name,
+                        price,
+                        category,
+                        description,
+                        image_url,
+                        req.params.id
+                    ]
+                );
+
+            if (result.rows.length === 0) {
+                return res.status(404).json({
+                    message:
+                        "Không tìm thấy sản phẩm"
+                });
+            }
+
+            res.json({
+                message:
+                    "Cập nhật sản phẩm thành công",
+
+                product:
+                    result.rows[0]
+            });
+
+        } catch (error) {
+            console.error(
+                "Update product error:",
+                error.message
+            );
+
+            res.status(500).json({
+                message:
+                    "Lỗi khi cập nhật sản phẩm",
+
+                error:
+                    error.message
+            });
+        }
+    }
+);
+
+/* =====================================================
+   PRODUCTS - DELETE
+===================================================== */
+
+app.delete(
+    "/api/products/:id",
+    authenticateToken,
+    requireAdmin,
+    async (req, res) => {
+        try {
+            const result =
+                await pool.query(
+                    `
+                    DELETE FROM products
+                    WHERE id = $1
+                    RETURNING *
+                    `,
+                    [req.params.id]
+                );
+
+            if (result.rows.length === 0) {
+                return res.status(404).json({
+                    message:
+                        "Không tìm thấy sản phẩm"
+                });
+            }
+
+            res.json({
+                message:
+                    "Xóa sản phẩm thành công",
+
+                product:
+                    result.rows[0]
+            });
+
+        } catch (error) {
+            console.error(
+                "Delete product error:",
+                error.message
+            );
+
+            res.status(500).json({
+                message:
+                    "Lỗi khi xóa sản phẩm",
+
+                error:
+                    error.message
+            });
+        }
+    }
+);
+
+/* =====================================================
+   ORDERS - CREATE
+===================================================== */
+
+app.post(
+    "/api/orders",
+    authenticateToken,
+    async (req, res) => {
+        const client =
+            await pool.connect();
+
+        try {
+            const {
+                customer_name,
+                customer_phone,
+                customer_address,
+                items
+            } = req.body;
+
+            if (
+                !customer_name ||
+                !customer_phone ||
+                !customer_address ||
+                !Array.isArray(items) ||
+                items.length === 0
+            ) {
+                client.release();
+
+                return res.status(400).json({
+                    message:
+                        "Thông tin đơn hàng không đầy đủ"
+                });
+            }
+
+            await client.query("BEGIN");
+
+            let totalAmount = 0;
+
+            const orderItems = [];
+
+            for (const item of items) {
+                const productResult =
+                    await client.query(
+                        `
+                        SELECT *
+                        FROM products
+                        WHERE id = $1
+                        `,
+                        [item.product_id]
+                    );
+
+                if (
+                    productResult.rows.length === 0
+                ) {
+                    throw new Error(
+                        `Không tìm thấy sản phẩm ${item.product_id}`
+                    );
+                }
+
+                const product =
+                    productResult.rows[0];
+
+                const quantity =
+                    Number(item.quantity);
+
+                if (
+                    !Number.isInteger(quantity) ||
+                    quantity <= 0
+                ) {
+                    throw new Error(
+                        "Số lượng sản phẩm không hợp lệ"
+                    );
+                }
+
+                const price =
+                    Number(product.price);
+
+                const subtotal =
+                    price * quantity;
+
+                totalAmount += subtotal;
+
+                orderItems.push({
+                    product_id:
+                        product.id,
+
+                    product_name:
+                        product.name,
+
+                    quantity,
+
+                    price,
+
+                    subtotal
+                });
+            }
+
+            const orderResult =
+                await client.query(
+                    `
+                    INSERT INTO orders
+                    (
+                        user_id,
+                        customer_name,
+                        customer_phone,
+                        customer_address,
+                        total_amount,
+                        status
+                    )
+                    VALUES
+                    ($1, $2, $3, $4, $5, $6)
+                    RETURNING *
+                    `,
+                    [
+                        req.user.id,
+                        customer_name,
+                        customer_phone,
+                        customer_address,
+                        totalAmount,
+                        "pending"
+                    ]
+                );
+
+            const order =
+                orderResult.rows[0];
+
+            for (const item of orderItems) {
+                await client.query(
+                    `
+                    INSERT INTO order_items
+                    (
+                        order_id,
+                        product_id,
+                        product_name,
+                        quantity,
+                        price,
+                        subtotal
+                    )
+                    VALUES
+                    ($1, $2, $3, $4, $5, $6)
+                    `,
+                    [
+                        order.id,
+                        item.product_id,
+                        item.product_name,
+                        item.quantity,
+                        item.price,
+                        item.subtotal
+                    ]
+                );
+            }
+
+            await client.query("COMMIT");
+
+            res.status(201).json({
+                message:
+                    "Đặt hàng thành công",
+
+                order
+            });
+
+        } catch (error) {
+            await client.query("ROLLBACK");
+
+            console.error(
+                "Create order error:",
+                error.message
+            );
+
+            res.status(500).json({
+                message:
+                    "Lỗi khi tạo đơn hàng",
+
+                error:
+                    error.message
+            });
+
+        } finally {
+            client.release();
+        }
+    }
+);
+
+/* =====================================================
+   ORDERS - USER ORDERS
+===================================================== */
+
+app.get(
+    "/api/orders/my",
+    authenticateToken,
+    async (req, res) => {
+        try {
+            const orders =
+                await pool.query(
+                    `
+                    SELECT *
+                    FROM orders
+                    WHERE user_id = $1
+                    ORDER BY id DESC
+                    `,
+                    [req.user.id]
+                );
+
+            res.json(
+                orders.rows
+            );
+
+        } catch (error) {
+            console.error(
+                "My orders error:",
+                error.message
+            );
+
+            res.status(500).json({
+                message:
+                    "Lỗi khi lấy đơn hàng"
+            });
+        }
+    }
+);
+
+/* =====================================================
+   ORDERS - ADMIN GET ALL
+===================================================== */
+
+app.get(
+    "/api/admin/orders",
+    authenticateToken,
+    requireAdmin,
+    async (req, res) => {
+        try {
+            const result =
+                await pool.query(
+                    `
+                    SELECT
+                        o.*,
+                        u.name AS user_name,
+                        u.email AS user_email
+                    FROM orders o
+                    LEFT JOIN users u
+                        ON o.user_id = u.id
+                    ORDER BY o.id DESC
+                    `
+                );
+
+            res.json(
+                result.rows
+            );
+
+        } catch (error) {
+            console.error(
+                "Admin orders error:",
+                error.message
+            );
+
+            res.status(500).json({
+                message:
+                    "Lỗi khi lấy danh sách đơn hàng"
             });
         }
     }
@@ -587,6 +1151,7 @@ app.use(
         res.status(404).json({
             message:
                 "API không tồn tại",
+
             path:
                 req.originalUrl
         });
@@ -594,11 +1159,30 @@ app.use(
 );
 
 /* =====================================================
-   START
+   GLOBAL ERROR HANDLER
+===================================================== */
+
+app.use(
+    (error, req, res, next) => {
+        console.error(
+            "Global error:",
+            error.message
+        );
+
+        res.status(500).json({
+            message:
+                "Internal Server Error"
+        });
+    }
+);
+
+/* =====================================================
+   START SERVER
 ===================================================== */
 
 async function startServer() {
     await testDatabase();
+
     await initializeDatabase();
 
     app.listen(
@@ -606,7 +1190,11 @@ async function startServer() {
         "0.0.0.0",
         () => {
             console.log(
-                `✅ Server running on port ${PORT}`
+                `✅ Phone Store Cloud API running on port ${PORT}`
+            );
+
+            console.log(
+                "✅ Database: Supabase PostgreSQL"
             );
         }
     );
