@@ -1,0 +1,26 @@
+name: Phone Store Multi-Cloud CI/CD
+
+on:
+  push:
+    branches: [ "main" ]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+
+      - name: Install backend
+        run: echo "Installing backend..."
+
+      - name: Install frontend
+        run: echo "Installing frontend..."
+
+      - name: Build frontend
+        run: echo "Building frontend..."
